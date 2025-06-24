@@ -1,9 +1,4 @@
 const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
-
-// Express server for Render (required for web services)
-const app = express();
-const PORT = process.env.PORT || 3000;
 
 // Use environment variables for sensitive data
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -32,33 +27,6 @@ const signalPatterns = [
     /Crash 500 Index (BUY|SELL) Signal/i,
     /Volatility.*Index.*(BUY|SELL) Signal/i
 ];
-
-// Express routes for health checking
-app.get('/', (req, res) => {
-    res.json({
-        status: 'Bot is running!',
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        bot_running: true,
-        uptime: process.uptime(),
-        environment: {
-            bot_token_set: !!BOT_TOKEN,
-            source_group_set: !!SOURCE_GROUP_ID,
-            target_channel_set: !!TARGET_CHANNEL_ID
-        }
-    });
-});
-
-// Start Express server
-app.listen(PORT, () => {
-    console.log(`🌐 Server running on port ${PORT}`);
-});
 
 // Function to check if message contains trading signals
 function containsSignal(text) {
@@ -134,6 +102,11 @@ bot.getMe().then((botInfo) => {
     console.error('❌ Failed to start bot:', error.message);
     process.exit(1);
 });
+
+// Keep the process alive
+setInterval(() => {
+    console.log('🔄 Bot is alive - Uptime:', Math.floor(process.uptime()), 'seconds');
+}, 300000); // Log every 5 minutes
 
 // Graceful shutdown
 process.on('SIGINT', () => {
