@@ -1,4 +1,9 @@
 const TelegramBot = require('node-telegram-bot-api');
+const express = require('express');
+
+// Express server for Render (required for web services)
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Use environment variables for sensitive data
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -14,8 +19,16 @@ if (!BOT_TOKEN || !SOURCE_GROUP_ID || !TARGET_CHANNEL_ID) {
     process.exit(1);
 }
 
-// Create bot instance
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+// Create bot instance with better error handling
+const bot = new TelegramBot(BOT_TOKEN, { 
+    polling: {
+        interval: 300,
+        autoStart: false,
+        params: {
+            timeout: 10
+        }
+    }
+});
 
 // Define signal patterns to match
 const signalPatterns = [
@@ -27,6 +40,39 @@ const signalPatterns = [
     /Crash 500 Index (BUY|SELL) Signal/i,
     /Volatility.*Index.*(BUY|SELL) Signal/i
 ];
+
+// Express routes for health checking
+app.get('/', (req, res) => {
+    res.json({
+        status: 'Bot is running!',
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString(),
+        bot_info: {
+            polling: bot.isPolling(),
+            source_group: SOURCE_GROUP_ID,
+            target_channel: TARGET_CHANNEL_ID
+        }
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        bot_running: bot.isPolling(),
+        uptime: process.uptime()
+    });
+});
+
+app.get('/restart', (req, res) => {
+    console.log('🔄 Manual restart requested');
+    restartBot();
+    res.json({ message: 'Bot restart initiated' });
+});
+
+// Start Express server
+app.listen(PORT, () => {
+    console.log(`🌐 Server running on port ${PORT}`);
+});
 
 // Function to check if message contains trading signals
 function containsSignal(text) {
@@ -48,13 +94,57 @@ async function forwardSignal(message) {
         console.log('✅ Signal forwarded successfully:', messageText.substring(0, 50) + '...');
     } catch (error) {
         console.error('❌ Error forwarding signal:', error.message);
-        
-        if (error.message.includes('chat not found')) {
-            console.log('🔍 Bot cannot access the target channel. Please check:');
-            console.log('1. Bot is added as admin to the channel');
-            console.log('2. Channel ID is correct');
-            console.log('3. Bot has permission to post messages');
+    }
+}
+
+// Function to safely start bot
+async function startBot() {
+    try {
+        // Stop polling if already running
+        if (bot.isPolling()) {
+            console.log('🛑 Stopping existing polling...');
+            await bot.stopPolling();
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
+
+        // Clear any pending updates
+        console.log('🧹 Clearing pending updates...');
+        await bot.getUpdates({ offset: -1 });
+
+        // Start polling
+        console.log('🚀 Starting bot polling...');
+        await bot.startPolling();
+        
+        console.log('✅ Bot polling started successfully');
+        
+        // Get bot info
+        const botInfo = await bot.getMe();
+        console.log('🤖 Trading Signal Bot started!');
+        console.log('📋 Bot Info:', botInfo.username);
+        console.log('👥 Monitoring group:', SOURCE_GROUP_ID);
+        console.log('📢 Forwarding to channel:', TARGET_CHANNEL_ID);
+        
+        // Test channel access
+        setTimeout(testChannelAccess, 3000);
+        
+    } catch (error) {
+        console.error('❌ Failed to start bot:', error.message);
+        // Retry after 5 seconds
+        setTimeout(startBot, 5000);
+    }
+}
+
+// Function to restart bot
+async function restartBot() {
+    try {
+        console.log('🔄 Restarting bot...');
+        if (bot.isPolling()) {
+            await bot.stopPolling();
+            await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        await startBot();
+    } catch (error) {
+        console.error('❌ Error restarting bot:', error.message);
     }
 }
 
@@ -70,53 +160,54 @@ async function testChannelAccess() {
 
 // Listen for messages
 bot.on('message', async (msg) => {
-    // Only process messages from the source group
-    if (msg.chat.id.toString() !== SOURCE_GROUP_ID.toString()) {
-        return;
-    }
-    
-    const messageText = msg.text || msg.caption || '';
-    
-    // Check if message contains trading signals
-    if (containsSignal(messageText)) {
-        console.log('🎯 Trading signal detected:', messageText.substring(0, 100) + '...');
-        await forwardSignal(msg);
+    try {
+        // Only process messages from the source group
+        if (msg.chat.id.toString() !== SOURCE_GROUP_ID.toString()) {
+            return;
+        }
+        
+        const messageText = msg.text || msg.caption || '';
+        
+        // Check if message contains trading signals
+        if (containsSignal(messageText)) {
+            console.log('🎯 Trading signal detected:', messageText.substring(0, 100) + '...');
+            await forwardSignal(msg);
+        }
+    } catch (error) {
+        console.error('❌ Error processing message:', error.message);
     }
 });
 
-// Handle polling errors
-bot.on('polling_error', (error) => {
+// Handle polling errors with restart logic
+bot.on('polling_error', async (error) => {
     console.error('🚨 Polling error:', error.code, error.message);
-});
-
-// Bot startup
-bot.getMe().then((botInfo) => {
-    console.log('🤖 Trading Signal Bot started!');
-    console.log('📋 Bot Info:', botInfo.username);
-    console.log('👥 Monitoring group:', SOURCE_GROUP_ID);
-    console.log('📢 Forwarding to channel:', TARGET_CHANNEL_ID);
     
-    // Test channel access after a short delay
-    setTimeout(testChannelAccess, 3000);
-}).catch((error) => {
-    console.error('❌ Failed to start bot:', error.message);
-    process.exit(1);
+    if (error.code === 'ETELEGRAM' && error.message.includes('409 Conflict')) {
+        console.log('🔄 Conflict detected, restarting bot in 5 seconds...');
+        setTimeout(restartBot, 5000);
+    } else if (error.code === 'ETELEGRAM' && error.message.includes('terminated by other getUpdates')) {
+        console.log('🔄 Multiple instances detected, restarting bot in 10 seconds...');
+        setTimeout(restartBot, 10000);
+    }
 });
-
-// Keep the process alive
-setInterval(() => {
-    console.log('🔄 Bot is alive - Uptime:', Math.floor(process.uptime()), 'seconds');
-}, 300000); // Log every 5 minutes
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     console.log('\n🛑 Bot shutting down...');
-    bot.stopPolling();
+    if (bot.isPolling()) {
+        await bot.stopPolling();
+    }
     process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     console.log('\n🛑 Bot received SIGTERM, shutting down...');
-    bot.stopPolling();
+    if (bot.isPolling()) {
+        await bot.stopPolling();
+    }
     process.exit(0);
 });
+
+// Start the bot
+console.log('🔧 Initializing bot...');
+setTimeout(startBot, 2000); // Wait 2 seconds before starting
